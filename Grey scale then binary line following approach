@@ -1,0 +1,148 @@
+from picamera2 import Picamera2
+import cv2
+import numpy as np
+import RPi.GPIO as GPIO
+from time import sleep
+
+enA = 12
+enB = 13
+p1 = 27
+p2 = 17
+p3 = 22
+p4 = 6
+pulse1 = 0.0
+pulse2 = 0.0
+encoder1 = 26
+encoder2 = 21
+ppr = 20.0
+degree = 0.0
+degree2 = 0.0
+circumference = 22.00
+average_distance = 0.0
+last_state_1 = 0
+last_state_2 = 0
+distance1 = 0
+distance2 = 0
+width = 640
+center = width // 2
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+
+GPIO.setup(p1, GPIO.OUT)
+GPIO.setup(p2, GPIO.OUT)
+GPIO.setup(p3, GPIO.OUT)
+GPIO.setup(p4, GPIO.OUT)
+GPIO.setup(enB, GPIO.OUT)
+GPIO.setup(enA, GPIO.OUT)
+GPIO.setup(encoder1, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(encoder2, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+pi_pwm = GPIO.PWM(enA, 1000)
+pi_pwm2 = GPIO.PWM(enB, 1000)
+
+pi_pwm.start(42)
+pi_pwm2.start(42)
+
+picam = Picamera2()
+configure = picam.create_preview_configuration(main={"size": (640,480), "format": "RGB888"})
+picam.configure(configure)
+picam.start()
+
+def count1(channel):
+    global pulse1
+    pulse1 += 1
+    
+def count2(channel):
+    global pulse2
+    pulse2 += 1
+ 
+def combined1(channel):
+    count1(channel)
+    calculate1(channel)
+    
+def combined2(channel):
+    count2(channel)
+    calculate2(channel)
+
+def forward():
+    GPIO.output(p1, GPIO.HIGH)
+    GPIO.output(p2, GPIO.LOW)
+    GPIO.output(p3, GPIO.HIGH)
+    GPIO.output(p4, GPIO.LOW)
+
+def back():
+    GPIO.output(p1, GPIO.LOW)
+    GPIO.output(p2, GPIO.HIGH)
+    GPIO.output(p3, GPIO.LOW)
+    GPIO.output(p4, GPIO.HIGH)
+    
+def right():
+    GPIO.output(p1, GPIO.LOW)
+    GPIO.output(p2, GPIO.HIGH)
+    GPIO.output(p3, GPIO.HIGH)
+    GPIO.output(p4, GPIO.LOW)
+    
+def left():
+    GPIO.output(p1, GPIO.HIGH)
+    GPIO.output(p2, GPIO.LOW)
+    GPIO.output(p3, GPIO.LOW)
+    GPIO.output(p4, GPIO.HIGH)
+    
+def stop():
+    GPIO.output(p1, GPIO.LOW)
+    GPIO.output(p2, GPIO.LOW)
+    GPIO.output(p3, GPIO.LOW)
+    GPIO.output(p4, GPIO.LOW) 
+    
+def encoder11(channel):
+    global pulse1
+    global average_distance
+    global last_state_1
+    global distance1
+    input1 = GPIO.input(encoder1)
+    if input1 == 1 and last_state_1 == 0:
+        pulse1 += 1
+    last_state_1 = input1
+    distance1 = (circumference / ppr) * pulse1
+    
+def encoder22(channel):
+    global pulse2
+    global average_distance
+    global last_state_2
+    global distance2
+    input2 = GPIO.input(encoder2)
+    if input2 == 1 and last_state_2 == 0:
+        pulse2 += 1
+    last_state_2 = input2
+    distance2 = (circumference / ppr) * pulse2
+    
+GPIO.add_event_detect(encoder1, GPIO.BOTH , callback=encoder11)
+GPIO.add_event_detect(encoder2, GPIO.BOTH, callback=encoder22)
+    
+
+while True:
+    frame = picam.capture_array() 
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if contours:
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        M = cv2.moments(largest_contour)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            print('cx = {}'.format(cx))
+            if cx < center - 50:
+                left()
+            elif cx > center + 50:
+                right()
+            else:
+                forward()
+                
+    cv2.imwrite("dilate07.jpg", binary)
+        
+cv2.destroyAllWindows()
+picam.stop()
