@@ -1,0 +1,183 @@
+from picamera2 import Picamera2
+import cv2
+import numpy as np
+import RPi.GPIO as GPIO
+from time import sleep
+import tflite_runtime.interpreter as tflite
+
+# === Motor & Encoder Setup ===
+enA = 12
+enB = 13
+p1 = 27
+p2 = 17
+p3 = 22
+p4 = 6
+encoder1 = 26
+encoder2 = 21
+
+frame_count = 0          
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+GPIO.setup(p1, GPIO.OUT)
+GPIO.setup(p2, GPIO.OUT)
+GPIO.setup(p3, GPIO.OUT)
+GPIO.setup(p4, GPIO.OUT)
+GPIO.setup(enB, GPIO.OUT)
+GPIO.setup(enA, GPIO.OUT)
+GPIO.setup(encoder1, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(encoder2, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+pi_pwm = GPIO.PWM(enA, 1000)
+pi_pwm2 = GPIO.PWM(enB, 1000)
+pi_pwm.start(42)
+pi_pwm2.start(42)
+
+# === Motor Control Functions ===
+def forward():
+    GPIO.output(p1, GPIO.HIGH)
+    GPIO.output(p2, GPIO.LOW)
+    GPIO.output(p3, GPIO.HIGH)
+    GPIO.output(p4, GPIO.LOW)
+
+def back():
+    GPIO.output(p1, GPIO.LOW)
+    GPIO.output(p2, GPIO.HIGH)
+    GPIO.output(p3, GPIO.LOW)
+    GPIO.output(p4, GPIO.HIGH)
+
+def right():
+    GPIO.output(p1, GPIO.LOW)
+    GPIO.output(p2, GPIO.HIGH)
+    GPIO.output(p3, GPIO.HIGH)
+    GPIO.output(p4, GPIO.LOW)
+
+def left():
+    GPIO.output(p1, GPIO.HIGH)
+    GPIO.output(p2, GPIO.LOW)
+    GPIO.output(p3, GPIO.LOW)
+    GPIO.output(p4, GPIO.HIGH)
+
+def stop():
+    GPIO.output(p1, GPIO.LOW)
+    GPIO.output(p2, GPIO.LOW)
+    GPIO.output(p3, GPIO.LOW)
+    GPIO.output(p4, GPIO.LOW)
+
+# === Camera Setup ===
+picam2 = Picamera2()
+configure = picam2.create_preview_configuration(main={"size": (640, 480), "format": "RGB888"})
+picam2.configure(configure)
+picam2.start()
+
+# === HSV Color Ranges ===
+COLOR_RANGES = {
+    'red':    [(0, 100, 100), (10, 255, 255)],
+    'blue':   [(100, 150, 0), (140, 255, 255)],
+    'green':  [(40, 70, 70), (80, 255, 255)],
+    'yellow': [(20, 100, 100), (30, 255, 255)],
+    'black':  [(0, 0, 0), (180, 255, 50)],
+}
+
+# === Helper Functions ===
+def get_mask(hsv_frame, color):
+    lower, upper = COLOR_RANGES[color]
+    return cv2.inRange(hsv_frame, np.array(lower), np.array(upper))
+
+def find_line_center(mask):
+    M = cv2.moments(mask)
+    if M["m00"] > 0:
+        cx = int(M["m10"] / M["m00"])
+        return cx
+    return None
+
+def detect_shapes(frame):
+    # Convert to grayscale
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Apply adaptive thresholding
+    thresh = cv2.adaptiveThreshold(blurred, 255,
+                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 11, 3)
+
+    # Find contours
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        perimeter = cv2.arcLength(cnt, True)
+
+        if area < 300 or perimeter < 100:
+            continue
+
+        # Approximate the shape
+        approx = cv2.approxPolyDP(cnt, 0.02 * perimeter, True)
+        vertices = len(approx)
+        shape = "Unidentified"
+        circularity = 0
+
+        if vertices == 3:
+            shape = "Triangle"
+        elif vertices == 4:
+            shape = "Rectangle"
+        elif vertices == 5:
+            shape = "Pentagon"
+        elif vertices == 6:
+            shape = "Hexagon"
+        elif vertices > 6:
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+            if circularity > 0.5:
+                shape = "Circle"
+            else:
+                shape = "Three-Quarter Circle"
+
+        # Draw contour and label
+        cv2.drawContours(frame, [approx], -1, (0, 255, 0), 2)
+        x, y = approx.ravel()[0], approx.ravel()[1]
+        cv2.putText(frame, shape, (x, y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+        # Print for debug/log
+        print(f"Detected: {shape}, Vertices: {vertices}, Area: {area:.0f}, Perimeter: {perimeter:.0f}, Circularity: {circularity:.2f}")
+
+    return frame
+
+# === Main Loop ===
+try:
+    while True:
+        frame1 = picam2.capture_array()
+        frame = frame1[100:380, 100:540]  # Crop for region of interest
+        roi_shape = frame1[40:300, 190:450]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        # Combine masks of all target colors
+        combined_mask = np.zeros_like(hsv[:, :, 0])
+        for color in ['blue', 'yellow']:
+            combined_mask |= get_mask(hsv, color)
+
+        # Fallback to black if no color detected
+        cx = find_line_center(combined_mask)
+        if cx is None:
+            black_mask = get_mask(hsv, 'black')
+            cx = find_line_center(black_mask)
+
+        if cx is not None:
+            center = frame.shape[1] // 2
+            if cx < center - 50:
+                left()
+            elif cx > center + 50:
+                right()
+            else:
+                pi_pwm.ChangeDutyCycle(38)
+                pi_pwm2.ChangeDutyCycle(38)
+                forward()
+                
+        frame_count += 1
+        if frame_count % 40 == 0:
+            detect_shapes(roi_shape)
+finally:
+    picam2.stop()
+
